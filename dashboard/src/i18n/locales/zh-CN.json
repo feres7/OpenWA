@@ -535,6 +535,11 @@
     "messageContent": "消息内容",
     "messagePlaceholder": "在此输入你的消息...",
     "mediaUrl": "媒体 URL",
+    "uploadFile": "上传文件",
+    "browse": "浏览",
+    "removeFile": "移除文件",
+    "fileReadError": "文件读取失败",
+    "fileTooLarge": "文件过大（最大 18 MB）",
     "caption": "说明文字",
     "filename": "文件名",
     "captionPlaceholder": "输入说明文字...",
@@ -590,6 +595,8 @@
       "useBuiltIn": "使用内置 PostgreSQL 容器",
       "builtInDesc": "OpenWA 将为你管理 PostgreSQL 容器",
       "dbName": "数据库名称",
+      "schema": "模式",
+      "schemaDesc": "PostgreSQL 模式（SQLite 忽略）。默认为 'public'。该模式必须已存在。",
       "poolSize": "连接池大小",
       "ssl": "SSL 连接",
       "sslDesc": "启用 TLS/SSL 以保障数据库连接安全",
@@ -835,5 +842,14 @@
         "actionFailed": "操作失败"
       }
     }
+  },
+  "search": {
+    "placeholder": "搜索消息…",
+    "results": "{{count}} 条结果",
+    "empty": "未找到消息。",
+    "error": "搜索失败。请重试。",
+    "unavailable": "搜索未配置。",
+    "scope": { "current": "当前会话" },
+    "loading": "搜索中…"
   }
 }

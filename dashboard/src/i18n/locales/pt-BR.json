@@ -490,6 +490,11 @@
     "messageContent": "Conteúdo da mensagem",
     "messagePlaceholder": "Digite sua mensagem aqui...",
     "mediaUrl": "URL da mídia",
+    "uploadFile": "Enviar arquivo",
+    "browse": "Procurar",
+    "removeFile": "Remover arquivo",
+    "fileReadError": "Falha ao ler o arquivo",
+    "fileTooLarge": "O arquivo é muito grande (máx. 18 MB)",
     "caption": "Legenda",
     "filename": "Nome do arquivo",
     "captionPlaceholder": "Digite uma legenda...",
@@ -590,6 +595,8 @@
       "useBuiltIn": "Usar contêiner PostgreSQL integrado",
       "builtInDesc": "OpenWA gerenciará um contêiner PostgreSQL para você",
       "dbName": "Nome do banco de dados",
+      "schema": "Esquema",
+      "schemaDesc": "Esquema do PostgreSQL (ignorado para SQLite). Padrão 'public'. O esquema já deve existir.",
       "poolSize": "Tamanho do pool",
       "ssl": "Conexão SSL",
       "sslDesc": "Habilitar TLS/SSL para conexões seguras ao banco de dados",
@@ -835,5 +842,14 @@
         "actionFailed": "Falha na ação"
       }
     }
+  },
+  "search": {
+    "placeholder": "Pesquisar mensagens…",
+    "results": "{{count}} resultados",
+    "empty": "Nenhuma mensagem encontrada.",
+    "error": "Falha na pesquisa. Tente novamente.",
+    "unavailable": "A pesquisa não está configurada.",
+    "scope": { "current": "Esta sessão" },
+    "loading": "Pesquisando…"
   }
 }

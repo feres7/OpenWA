@@ -163,6 +163,15 @@ There is a **single shared media byte cap**, not a per-type table. A base64 (or 
 
 The contract is engine-neutral: pass neutral `@c.us` WIDs and the active engine (whatsapp-web.js or Baileys) de-normalizes them internally. Whether a mention surfaces a notification is ultimately client-side — outside a shared group some clients may not render it.
 
+### Send response: `201` means accepted, not delivered
+
+Every send route returns **HTTP 201** with `{ "messageId", "timestamp" }` as soon as the gateway hands the message to the WhatsApp client. This confirms the send was *accepted* — it does **not** confirm the recipient received it. Two consequences worth knowing:
+
+1. **WhatsApp does not reject an unregistered recipient synchronously.** A message to a number that is not on WhatsApp still returns `201` with a valid `messageId`, but never delivers (it sits at a single grey tick and may surface an error in the chat). This is the most common cause of a "successful send that never arrived" for a number you have not messaged before.
+2. **There is no synchronous delivery confirmation on either engine** (whatsapp-web.js or Baileys), so the `201` cannot be made to mean "delivered."
+
+**Before sending to a new number**, confirm it is a registered WhatsApp account with `GET /api/sessions/:sessionId/contacts/check/:number` (returns `{ exists, whatsappId }`; see the Contacts reference). For real delivery state, track the stored message's `status`, which advances asynchronously through `sent → delivered → read` (or `failed`) as WhatsApp sends acks — see the message shape under the Messages reference. A message that stays at `sent` indefinitely for a recipient you have never reached is almost certainly a number that is not on WhatsApp.
+
 ## 6.4 REST API Reference
 
 Every path below is prefixed with `/api`. Unless marked **public**, send `X-API-Key: <key>`; `OPERATOR`/`ADMIN` annotations require a key of at least that role. Responses are the raw payload (no envelope); list endpoints return a bare array.
@@ -367,19 +376,33 @@ Create a new WhatsApp session.
 | --- | --- | --- | --- | --- |
 | `name` | string | Yes | `@IsString`; length 3–50; `@Matches(/^[a-zA-Z0-9-]+$/)` (letters, numbers, hyphens only) | Unique session name; duplicate → `409` |
 | `config` | object | No | `@IsOptional` (arbitrary object, no shape validation) | Opaque engine config; defaults to `{}`; never returned by read routes |
-| `proxyUrl` | string | No | `@IsOptional`; `@IsString`; max 255; `@IsUrl` (protocols `http`/`https`/`socks4`/`socks5`, `require_protocol`, `require_tld:false`, `allow_underscores`) | Per-session proxy egress; credentialed `http://user:pass@host` and single-label hosts allowed; not SSRF-blocked |
+| `proxyUrl` | string | No | `@IsOptional`; `@IsString`; max 255; `@IsUrl` (protocols `http`/`https`/`socks4`/`socks5`, `require_protocol`, `require_tld:false`, `allow_underscores`) | Per-session proxy egress; credentialed `http://user:pass@host` and single-label hosts allowed; not SSRF-blocked. ⚠ **Must be a real, reachable proxy** — an unreachable value silently blocks the WhatsApp WebSocket (no QR, start → `504`); leave unset unless you need it. See "Per-session egress proxy" below. |
 | `proxyType` | `http` \| `https` \| `socks4` \| `socks5` | No | `@IsOptional`; `@IsIn([...])` | Proxy protocol |
 
 ```json
 {
   "name": "my-bot",
-  "config": { "autoReconnect": true },
-  "proxyUrl": "http://proxy.example.com:8080",
-  "proxyType": "http"
+  "config": { "autoReconnect": true }
 }
 ```
 
 Minimal: `{ "name": "my-bot" }`.
+
+**Optional — per-session egress proxy.** Route a session's traffic through a proxy only if your
+network cannot reach WhatsApp directly. Set `proxyUrl`/`proxyType` on the same request:
+
+```json
+{
+  "name": "my-bot",
+  "proxyUrl": "http://user:pass@your-real-proxy.host:8080",
+  "proxyType": "http"
+}
+```
+
+> ⚠ `proxyUrl` **must point at a real, reachable proxy server.** A placeholder or unreachable value
+> (e.g. `http://proxy.example.com:8080`) launches the engine pinned to a dead proxy, so the WhatsApp
+> WebSocket never connects, **no QR code is ever delivered**, and `POST /api/sessions/:id/start`
+> returns `504 Gateway Timeout` after ~30s. Leave `proxyUrl` unset unless you genuinely need a proxy.
 
 **Response** `201`
 
@@ -391,8 +414,8 @@ Minimal: `{ "name": "my-bot" }`.
   "phone": null,
   "pushName": null,
   "config": { "autoReconnect": true },
-  "proxyUrl": "http://proxy.example.com:8080",
-  "proxyType": "http",
+  "proxyUrl": null,
+  "proxyType": null,
   "connectedAt": null,
   "lastActiveAt": null,
   "createdAt": "2026-06-25T09:00:00.000Z",
@@ -3793,6 +3816,7 @@ Merge-save infrastructure config to `data/.env.generated` (a `0600` secret file)
 | `database.sslRejectUnauthorized` | boolean | No | — | Only written when `sslEnabled` is true; default true |
 | `redis.enabled` / `.builtIn` | boolean | No | — | `builtIn`+enabled forces `redis` container + profile |
 | `redis.host` / `.port` | string | No | `port` is a string | Defaults `localhost`/`6379` |
+| `redis.username` | string | No | — | Redis ACL username |
 | `redis.password` | string | No | secret | Empty keeps existing |
 | `queue.enabled` | boolean | No | — | Writes `QUEUE_ENABLED` |
 | `storage.type` | `'local' \| 's3'` | No | — | `local` drops stale S3 keys; `s3` drops `STORAGE_LOCAL_PATH` |
@@ -4396,6 +4420,81 @@ For `tools/call` the result is an MCP `CallToolResult` (`content` array of `text
 **Errors:** in-band JSON-RPC errors `-32601` (unknown method), `-32602` (invalid params / unknown tool), `-32700` (parse error), all at HTTP 200 · `500` only if the transport throws before headers are sent · `404` when `MCP_ENABLED` is not `true`
 
 > The full catalog of MCP tools (names, tiers, schemas) is documented separately — see **doc 24, MCP Integration**. This section documents only the transport endpoint.
+
+### 6.4.12 Search
+
+Base path `/api/search`. Cross-session full-text message search over an open `SearchProvider` contract;
+the built-in database full-text provider (PostgreSQL `tsvector`/`GIN`, SQLite `FTS5`) answers by
+default with zero external dependencies. Search is on by default; set `SEARCH_ENABLED=false` to remove
+the route and module entirely (the index is DB-maintained regardless — see
+[26 - Global Search](./26-global-search.md)). Requires at least `OPERATOR` role.
+
+**Auth:** API key (≥ `OPERATOR`)  ·  **Scope:** session-scoped — a scoped key's `allowedSessions` is
+injected server-side from the key (never from the query), so a scoped key cannot broaden its reach; an
+ADMIN / null-allowlist key searches all sessions.
+
+#### GET /api/search
+
+Search messages across sessions (active search provider).
+
+**Query parameters**
+
+| Name | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `q` | string | **Yes** | — | Search term. Must be non-empty after trim; whitespace-only is rejected with `400`. Passed to the active provider's native full-text matcher. |
+| `sessionId` | string | No | — | Restrict to a single session id (intersected with the key's `allowedSessions` scope). |
+| `chatId` | string | No | — | Restrict to a single chat id. |
+| `direction` | enum (`incoming` \| `outgoing`) | No | — | Filter by message direction. |
+| `type` | string | No | — | Filter by stored message `type` (e.g. `text`, `image`, `video`). Compared against `messages.type`; not an enum validation, any string is accepted and unmatched values simply return no hits. |
+| `from` | string | No | — | Filter by sender. |
+| `dateFrom` | integer (epoch ms) | No | — | Inclusive lower bound on `timestamp`. A non-numeric value is rejected with `400`. |
+| `dateTo` | integer (epoch ms) | No | — | Inclusive upper bound on `timestamp`. A non-numeric value is rejected with `400`. |
+| `limit` | integer (≥ 1) | No | `50` | Max hits to return. Clamped to `SEARCH_LIMIT_MAX` (default `100`). A non-numeric value is rejected with `400`. |
+| `offset` | integer (≥ 0) | No | `0` | Pagination offset. A non-numeric value is rejected with `400`. |
+
+**Response** `200` — `SearchResults`
+
+```json
+{
+  "hits": [
+    {
+      "messageId": "8f3c2b1a-9d4e-4c7a-8b2f-1e6d5a4c3b2a",
+      "waMessageId": "true_62812...@c.us_3A...",
+      "sessionId": "a1b2c3d4-...",
+      "chatId": "6281234567890@c.us",
+      "body": "full original message body...",
+      "snippet": "...order <mark>confirmed</mark> for tomorrow…",
+      "timestamp": 1751904000000,
+      "type": "text",
+      "direction": "incoming",
+      "from": "6281234567890@c.us",
+      "score": 0.075
+    }
+  ],
+  "total": 23,
+  "tookMs": 6,
+  "provider": "builtin-fts"
+}
+```
+
+- `snippet` is an XSS-safe text excerpt with `<mark>`/`</mark>` highlight markers around the matched
+  term (both dialects emit the same markers). Render it as text, never as HTML.
+- `total` is an exact count for pagination, computed lazily only when the returned page could be full.
+- `provider` names which backend answered (e.g. `builtin-fts`); it is the registered `SearchProvider`
+  id, so it changes when a plugin backend is selected via `SEARCH_PROVIDER`.
+- `score` is optional and provider-specific (rank ordering is stable within a provider; cross-provider
+  scores are not comparable).
+
+**Errors:** `400` empty/whitespace `q`, a non-numeric `dateFrom`/`dateTo`/`limit`/`offset`, or a malformed
+SQLite FTS5 query (unbalanced quote/paren, bare operator) — Postgres's `websearch_to_tsquery` is
+tolerant and has no equivalent · `401` missing/invalid `X-API-Key` · `403` key role below `OPERATOR` ·
+`501` no search provider configured (including a non-FTS5 SQLite build, where the provider is absent) ·
+`503` active provider unhealthy (**reserved**: the built-in provider does not return it; it is the
+contract surface for a future plugin provider whose `search()` throws `ServiceUnavailableException`).
+
+> Scoping is authoritative: a scoped API key's `allowedSessions` is applied server-side and cannot be
+> overridden via the query — there is no `sessionIds` query parameter, and `SearchService` overwrites
+> any session scope at the provider boundary.
 
 ## 6.5 Real-time API (WebSocket)
 

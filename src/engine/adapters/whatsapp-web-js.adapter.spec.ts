@@ -5,6 +5,7 @@ import {
   extractLinkedParentJID,
   isHttpUrl,
   isSupportedProxyUrl,
+  isExecutionContextDestroyedError,
   buildProxyLaunchConfig,
   loadRemoteMedia,
   resolveAuthTimeoutMs,
@@ -16,8 +17,8 @@ import * as fs from 'fs';
 import * as qrcode from 'qrcode';
 import { UnprocessableEntityException } from '@nestjs/common';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
-import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { ChannelNotFoundError } from '../../common/errors/channel-not-found.error';
+import { ChannelMediaNotSupportedError } from '../../common/errors/channel-media-not-supported.error';
 import { EngineStatus } from '../interfaces/whatsapp-engine.interface';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
 import { fetch as undiciFetch } from 'undici';
@@ -80,6 +81,35 @@ describe('isSupportedProxyUrl', () => {
   it.each(['not a url', 'ftp://proxy:21', 'proxy:8080', ''])('rejects %s', url => {
     expect(isSupportedProxyUrl(url)).toBe(false);
   });
+});
+
+describe('isExecutionContextDestroyedError (#708 — Puppeteer context loss during initialize)', () => {
+  it('matches the bare Puppeteer error', () => {
+    expect(isExecutionContextDestroyedError('Execution context was destroyed')).toBe(true);
+  });
+
+  it('matches the Runtime.callFunctionOn form (the stale-profile signature during inject)', () => {
+    expect(
+      isExecutionContextDestroyedError('Protocol error (Runtime.callFunctionOn): Execution context was destroyed.'),
+    ).toBe(true);
+  });
+
+  it('matches the "most likely because of a navigation" variant', () => {
+    expect(
+      isExecutionContextDestroyedError('Execution context was destroyed, most likely because of a navigation.'),
+    ).toBe(true);
+  });
+
+  it('is case-insensitive', () => {
+    expect(isExecutionContextDestroyedError('EXECUTION CONTEXT WAS DESTROYED')).toBe(true);
+  });
+
+  it.each(['Failed to launch the browser process:  Code: null', 'Target closed', 'Navigation timeout exceeded', ''])(
+    'does not match unrelated initialize errors (%s)',
+    reason => {
+      expect(isExecutionContextDestroyedError(reason)).toBe(false);
+    },
+  );
 });
 
 describe('buildProxyLaunchConfig (#628 — proxy credentials must not go into --proxy-server)', () => {
@@ -536,6 +566,45 @@ describe('WhatsAppWebJsAdapter channel-JID guard (#554 — wwebjs Channel lacks 
       await expect(readyAdapter({ getChatById }).getChatLabels(USER)).resolves.toEqual([
         { id: '1', name: 'VIP', hexColor: '#fff' },
       ]);
+    });
+  });
+
+  describe('media sends (sendImageMessage/sendVideo/sendAudio/sendDocument/sendSticker)', () => {
+    // whatsapp-web.js crashes building a channel media message: `msg.avParams is not a function`
+    // (upstream wwebjs#201823). image/video/audio/document funnel through sendMediaMessage; sticker
+    // has its own path but hits the same channel crash. Guarding both fail-fasts as a typed 501
+    // instead of surfacing the raw TypeError as a 500 (#673).
+    it('rejects sendImageMessage on a newsletter JID with ChannelMediaNotSupportedError (→ 501)', async () => {
+      const sendMessage = jest.fn();
+      const err = await readyAdapter({ sendMessage })
+        .sendImageMessage(NEWSLETTER, { mimetype: 'image/jpeg', data: Buffer.from([1]).toString('base64') })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ChannelMediaNotSupportedError);
+      // Pin the user-facing contract: this must surface as 501, not regress to a 500 (the raw
+      // upstream crash) or drift if the base class ever changes.
+      expect((err as ChannelMediaNotSupportedError).getStatus()).toBe(501);
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('rejects sendStickerMessage on a newsletter JID too (parity — sticker has its own path but same crash)', async () => {
+      const sendMessage = jest.fn();
+      const err = await readyAdapter({ sendMessage })
+        .sendStickerMessage(NEWSLETTER, { mimetype: 'image/webp', data: Buffer.from([1]).toString('base64') })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ChannelMediaNotSupportedError);
+      expect((err as ChannelMediaNotSupportedError).getStatus()).toBe(501);
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('still sends media on a user JID', async () => {
+      const sendMessage = jest.fn().mockResolvedValue({ id: { _serialized: 'M1' }, timestamp: 1 });
+      await expect(
+        readyAdapter({ sendMessage }).sendImageMessage(USER, {
+          mimetype: 'image/jpeg',
+          data: Buffer.from([1]).toString('base64'),
+        }),
+      ).resolves.toMatchObject({ id: 'M1' });
+      expect(sendMessage).toHaveBeenCalledWith(USER, expect.anything(), expect.anything());
     });
   });
 });
@@ -1015,30 +1084,105 @@ describe('WhatsAppWebJsAdapter.resolveContactPhone (@lid -> phone, #263)', () =>
   });
 });
 
-describe('WhatsAppWebJsAdapter status methods (Baileys-only, surface HTTP 501, #455)', () => {
-  // The 4 status methods are Baileys-only; the wwebjs adapter stubs each to EngineNotSupportedError
-  // (which extends NestJS NotImplementedException -> HTTP 501). This locks the new-contract signatures
-  // (postTextStatus(text, options) / postImage|VideoStatus(media, options) / deleteStatus(statusId))
-  // so a future refactor that silently starts returning data instead of throwing is caught here.
-  const readyAdapter = (): WhatsAppWebJsAdapter => {
+describe('WhatsAppWebJsAdapter status methods', () => {
+  const readyAdapter = (client: unknown): WhatsAppWebJsAdapter => {
     const adapter = new WhatsAppWebJsAdapter({ sessionId: 's', sessionDataPath: './data/sessions', puppeteer: {} });
     (adapter as unknown as { status: EngineStatus }).status = EngineStatus.READY;
-    // ensureReady() requires both status === READY and a non-null client before the method body runs.
-    (adapter as unknown as { client: unknown }).client = {};
+    (adapter as unknown as { client: unknown }).client = client;
     return adapter;
   };
   const media = { mimetype: 'image/png', data: 'iVBOR' };
   const options = { recipients: ['628111@c.us'] };
+  const STATUS_TTL_MS = 24 * 3_600_000;
 
-  it.each([
-    ['postTextStatus', ['hello', options]] as const,
-    ['postImageStatus', [media, options]] as const,
-    ['postVideoStatus', [media, options]] as const,
-    ['deleteStatus', ['STATUS1']] as const,
-  ])('%s rejects with EngineNotSupportedError (501)', async (method, args) => {
-    await expect(
-      (readyAdapter() as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[method](...args),
-    ).rejects.toBeInstanceOf(EngineNotSupportedError);
+  it('postTextStatus posts to status@broadcast with styling in `extra` and returns a StatusResult', async () => {
+    const sendMessage = jest.fn().mockResolvedValue({ id: { _serialized: 'STATUS1' }, timestamp: 1700000010 });
+    const result = await readyAdapter({ sendMessage }).postTextStatus('hello', {
+      ...options,
+      backgroundColor: '#ff0000',
+      font: 2,
+    });
+    expect(sendMessage).toHaveBeenCalledWith('status@broadcast', 'hello', {
+      extra: { backgroundColor: '#ff0000', fontStyle: 2 },
+    });
+    const ts = new Date(1700000010 * 1000);
+    expect(result).toEqual({ statusId: 'STATUS1', timestamp: ts, expiresAt: new Date(ts.getTime() + STATUS_TTL_MS) });
+  });
+
+  it.each([['postImageStatus'], ['postVideoStatus']] as const)(
+    '%s posts media to status@broadcast with the caption and returns a StatusResult',
+    async method => {
+      const sendMessage = jest.fn().mockResolvedValue({ id: { _serialized: 'STATUS2' }, timestamp: 1700000011 });
+      const result = await readyAdapter({ sendMessage })[method](media, { ...options, caption: 'cap' });
+      expect(sendMessage).toHaveBeenCalledWith('status@broadcast', expect.any(MessageMedia), { caption: 'cap' });
+      const ts = new Date(1700000011 * 1000);
+      expect(result.statusId).toBe('STATUS2');
+      expect(result.expiresAt).toEqual(new Date(ts.getTime() + STATUS_TTL_MS));
+    },
+  );
+
+  it('deleteStatus revokes via client.revokeStatusMessage(statusId)', async () => {
+    const revokeStatusMessage = jest.fn().mockResolvedValue(undefined);
+    await readyAdapter({ sendMessage: jest.fn(), revokeStatusMessage }).deleteStatus('STATUS1');
+    expect(revokeStatusMessage).toHaveBeenCalledWith('STATUS1');
+  });
+
+  const storyBroadcast = {
+    getContact: () => Promise.resolve({ id: { _serialized: '628111@c.us' }, name: 'Alice', pushname: 'Alice' }),
+    msgs: [
+      { id: { _serialized: 'ST1' }, type: 'image', body: 'cap1', timestamp: 1700000020 },
+      { id: { _serialized: 'ST2' }, type: 'chat', body: 'hello', timestamp: 1700000021 },
+    ],
+  };
+
+  it('getContactStatuses reads contact stories via getBroadcasts() mapped to Status[]', async () => {
+    const getBroadcasts = jest.fn().mockResolvedValue([storyBroadcast]);
+    const result = await readyAdapter({ sendMessage: jest.fn(), getBroadcasts }).getContactStatuses();
+    expect(getBroadcasts).toHaveBeenCalled();
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({
+      id: 'ST1',
+      contact: { id: '628111@c.us', name: 'Alice', pushName: 'Alice' },
+      type: 'image',
+      caption: 'cap1',
+      timestamp: new Date(1700000020 * 1000),
+      expiresAt: new Date(1700000020 * 1000 + 24 * 3_600_000),
+    });
+    expect(result[1].type).toBe('text');
+  });
+
+  it('getContactStatus reads one contact stories via getBroadcastById mapped to Status[]', async () => {
+    const getBroadcastById = jest.fn().mockResolvedValue(storyBroadcast);
+    const result = await readyAdapter({ sendMessage: jest.fn(), getBroadcastById }).getContactStatus('628111@c.us');
+    expect(getBroadcastById).toHaveBeenCalledWith('628111@c.us');
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual(
+      expect.objectContaining({
+        id: 'ST1',
+        type: 'image',
+        contact: { id: '628111@c.us', name: 'Alice', pushName: 'Alice' },
+      }),
+    );
+  });
+
+  it('getContactStatus returns [] for a contact with no active story (empty Broadcast, no 500)', async () => {
+    // getBroadcastById for a contact not currently posting resolves an "empty" Broadcast: the
+    // Broadcast constructor only _patches when data is truthy, so id/msgs/getContact are undefined.
+    const getBroadcastById = jest.fn().mockResolvedValue({ msgs: undefined });
+    const result = await readyAdapter({ sendMessage: jest.fn(), getBroadcastById }).getContactStatus(
+      '628999@s.whatsapp.net',
+    );
+    expect(getBroadcastById).toHaveBeenCalledWith('628999@s.whatsapp.net');
+    expect(result).toEqual([]);
+  });
+
+  it('getContactStatuses skips empty Broadcasts in the plural path (no crash)', async () => {
+    const getBroadcasts = jest.fn().mockResolvedValue([
+      { msgs: undefined }, // a contact whose story expired / phantom entry
+      storyBroadcast,
+    ]);
+    const result = await readyAdapter({ sendMessage: jest.fn(), getBroadcasts }).getContactStatuses();
+    expect(result).toHaveLength(2); // only the populated broadcast maps
   });
 });
 

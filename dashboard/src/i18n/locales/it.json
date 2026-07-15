@@ -535,6 +535,11 @@
     "messageContent": "Contenuto del Messaggio",
     "messagePlaceholder": "Inserisci qui il tuo messaggio...",
     "mediaUrl": "URL File Multimediale",
+    "uploadFile": "Carica file",
+    "browse": "Sfoglia",
+    "removeFile": "Rimuovi file",
+    "fileReadError": "Lettura del file non riuscita",
+    "fileTooLarge": "Il file è troppo grande (max 18 MB)",
     "caption": "Didascalia",
     "filename": "Nome File",
     "captionPlaceholder": "Inserisci una didascalia...",
@@ -590,6 +595,8 @@
       "useBuiltIn": "Usa Container PostgreSQL Integrato",
       "builtInDesc": "OpenWA gestirà un container PostgreSQL per te",
       "dbName": "Nome Database",
+      "schema": "Schema",
+      "schemaDesc": "Schema PostgreSQL (ignorato per SQLite). Predefinito 'public'. Lo schema deve esistere già.",
       "poolSize": "Dimensione del Pool",
       "ssl": "Connessione SSL",
       "sslDesc": "Abilita TLS/SSL per connessioni sicure al database",
@@ -835,5 +842,14 @@
         "actionFailed": "Azione non riuscita"
       }
     }
+  },
+  "search": {
+    "placeholder": "Cerca messaggi…",
+    "results": "{{count}} risultati",
+    "empty": "Nessun messaggio trovato.",
+    "error": "Ricerca fallita. Riprova.",
+    "unavailable": "La ricerca non è configurata.",
+    "scope": { "current": "Questa sessione" },
+    "loading": "Ricerca…"
   }
 }
