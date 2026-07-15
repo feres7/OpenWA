@@ -29,6 +29,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+      - /home/openwa
     pids_limit: 512
     mem_limit: ${OPENWA_MEM_LIMIT:-2g}
     ports:
@@ -42,11 +43,11 @@ services:
     environment:
       - NODE_ENV=${NODE_ENV:-development}
       - PORT=2785
-      - HOME=/tmp
+      - HOME=/home/openwa
       # Chromium reads its home from the passwd entry (no /home/openwa), so it needs writable, existing
       # config/cache dirs on the tmpfs or it hard-crashes at launch; the entrypoint pre-creates them. (#254)
-      - XDG_CONFIG_HOME=/tmp/.config
-      - XDG_CACHE_HOME=/tmp/.cache
+      - XDG_CONFIG_HOME=/home/openwa/.config
+      - XDG_CACHE_HOME=/home/openwa/.cache
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - DATABASE_TYPE=${DATABASE_TYPE:-sqlite}
       - DATABASE_NAME=${DATABASE_NAME:-/app/data/openwa.sqlite}
@@ -59,6 +60,11 @@ services:
       - SESSION_DATA_PATH=${SESSION_DATA_PATH:-/app/data/sessions}
       - PUPPETEER_HEADLESS=${PUPPETEER_HEADLESS:-true}
       - PUPPETEER_ARGS=${PUPPETEER_ARGS:---no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu}
+      # Blank override clears the image's system-Chromium pin so Puppeteer can
+      # resolve its own compatible browser from the persistent cache dir below.
+      - PUPPETEER_EXECUTABLE_PATH=${PUPPETEER_EXECUTABLE_PATH:-}
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=${PUPPETEER_SKIP_CHROMIUM_DOWNLOAD:-}
+      - PUPPETEER_CACHE_DIR=${PUPPETEER_CACHE_DIR:-/app/data/puppeteer}
       # Optional WhatsApp Web version override. Leave empty for whatsapp-web.js auto-selection.
       # If a session hangs at "authenticating", set WWEBJS_WEB_VERSION to a known-good cached build
       # from wppconnect-team/wa-version; latest|auto|off also forces auto-selection.
@@ -76,6 +82,7 @@ services:
       - QUEUE_ENABLED=${QUEUE_ENABLED:-false}
     volumes:
       - ./data:/app/data
+      - openwa-session-data:/app/data/sessions
     restart: unless-stopped
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://localhost:2785/api/health/ready']
@@ -90,3 +97,6 @@ services:
 networks:
   default:
     name: openwa-network
+
+volumes:
+  openwa-session-data:

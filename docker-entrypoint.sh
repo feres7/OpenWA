@@ -6,6 +6,12 @@ set -e
 mkdir -p /app/data/sessions /app/data/media /app/data/plugins
 chown -R openwa:openwa /app/data
 
+# When /home/openwa is provided by a writable tmpfs/volume, create/chown it so
+# Chromium-based engines can rely on the passwd home dir under the non-root user.
+if mkdir -p /home/openwa 2>/dev/null; then
+  chown openwa:openwa /home/openwa
+fi
+
 # Chromium leaves SingletonLock/SingletonSocket/SingletonCookie in each session profile and does
 # not remove them on an unclean shutdown; stale locks block the next launch ("profile appears to be
 # in use by another Chromium process", exit Code 21). No Chromium is running yet at entrypoint time,

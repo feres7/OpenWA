@@ -45,9 +45,8 @@ RUN npm run build && npm run dashboard:ci -- --include=dev && npm run dashboard:
 # ===== Stage 2: Production =====
 FROM docker.io/node:22-slim AS production
 
-# Install Chrome/Chromium and required dependencies
+# Install the shared runtime libraries required by Puppeteer's managed Chrome
 RUN apt-get update && apt-get install -y \
-    chromium \
     fonts-liberation \
     libappindicator3-1 \
     libasound2 \
@@ -71,9 +70,9 @@ RUN apt-get update && apt-get install -y \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Chrome executable path for Puppeteer
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+# Store Puppeteer's downloaded browser in the image so runtime sessions do not
+# depend on Debian's system Chromium wrapper/package.
+ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
 
 # Create app user for security
 RUN groupadd -r openwa && useradd -r -g openwa openwa
@@ -83,8 +82,9 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install production dependencies only
-RUN npm ci --omit=dev && npm cache clean --force
+# Install production dependencies only and fetch Puppeteer's matching browser
+# build during image creation.
+RUN npm ci --omit=dev && npx puppeteer browsers install chrome && npm cache clean --force
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
@@ -94,7 +94,7 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/dashboard/dist ./dashboard/dist
 
 # Create data directories with correct ownership
-RUN mkdir -p ./data/sessions ./data/media && \
+RUN mkdir -p ./data/sessions ./data/media ./.cache/puppeteer && \
     chown -R openwa:openwa /app
 
 # The non-root openwa user has no home of its own (`useradd -r`, no -m). Chromium resolves the home
