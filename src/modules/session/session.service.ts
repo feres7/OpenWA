@@ -1587,8 +1587,46 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
 
     // Most-recent first, then bound the response window. Sorting before the cap means a capped
     // response is the N newest chats (what clients show first) rather than an arbitrary slice.
-    const chats = [...(await engine.getChats())].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    let chats: ChatSummary[];
+    try {
+      chats = [...(await engine.getChats())];
+    } catch (error) {
+      this.logger.warn(`engine.getChats() failed for ${id}; falling back to persisted messages`, {
+        sessionId: id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      chats = await this.getChatsFromPersistedMessages(id);
+    }
+    chats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
     return paginate(chats, opts.limit, opts.offset);
+  }
+
+  private async getChatsFromPersistedMessages(sessionId: string): Promise<ChatSummary[]> {
+    const rows = await this.messageRepository.find({
+      where: { sessionId },
+      order: { createdAt: 'DESC' },
+      take: 5000,
+    });
+
+    const seen = new Set<string>();
+    const chats: ChatSummary[] = [];
+
+    for (const row of rows) {
+      if (!row.chatId || seen.has(row.chatId)) {
+        continue;
+      }
+      seen.add(row.chatId);
+      chats.push({
+        id: row.chatId,
+        name: row.chatName || row.chatId,
+        isGroup: row.chatId.endsWith('@g.us'),
+        unreadCount: 0,
+        timestamp: row.timestamp || Math.floor(row.createdAt.getTime() / 1000),
+        lastMessage: row.type === 'location' ? '📍' : row.body || undefined,
+      });
+    }
+
+    return chats;
   }
 
   async sendSeen(id: string, chatId: string): Promise<boolean> {

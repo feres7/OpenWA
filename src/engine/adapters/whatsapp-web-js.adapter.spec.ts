@@ -1722,6 +1722,15 @@ describe('LID resolution for individual sends (#573 — WhatsApp @c.us → @lid 
     expect(getNumberId).toHaveBeenCalledTimes(1);
   });
 
+  it('returns an explicit-unknown id when sendMessage resolves without a serialized id', async () => {
+    const getNumberId = jest.fn().mockResolvedValue({ _serialized: '999@lid' });
+    const sendMessage = jest.fn().mockResolvedValue(undefined);
+    const adapter = ready({ getNumberId, sendMessage });
+    const result = await adapter.sendTextMessage('628@c.us', 'x');
+    expect(result.id).toBe('');
+    expect(result.timestamp).toBeGreaterThan(0);
+  });
+
   it('reply routes its send leg to the resolved @lid (#583 R1)', async () => {
     const reply = jest.fn().mockResolvedValue(sentMessage);
     const quoted = { id: { _serialized: 'Q1' }, reply };

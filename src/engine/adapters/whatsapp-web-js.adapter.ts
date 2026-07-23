@@ -988,6 +988,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     const msg = await this.sendResolved(chatId, to =>
       mentions?.length ? this.client!.sendMessage(to, text, { mentions }) : this.client!.sendMessage(to, text),
     );
+    if (!msg?.id?._serialized) {
+      this.logger.warn(`sendMessage returned no serialized id for ${chatId}; returning an explicit-unknown id`);
+      return { id: '', timestamp: Math.floor(Date.now() / 1000) };
+    }
     return {
       id: msg.id._serialized,
       timestamp: msg.timestamp,

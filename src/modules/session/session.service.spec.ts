@@ -2349,6 +2349,63 @@ describe('SessionService', () => {
       expect(result[0].timestamp).toBe(49); // most-recent first
     });
 
+    it('falls back to persisted messages when engine.getChats throws', async () => {
+      const session = createMockSession();
+      (repository.findOne as jest.Mock).mockResolvedValue(session);
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+      await service.start('sess-uuid-1');
+
+      mockEngine.getChats.mockRejectedValue(new Error('r: r'));
+      (messageRepository.find as jest.Mock).mockResolvedValue([
+        {
+          chatId: '222@c.us',
+          chatName: 'Newest',
+          body: 'latest',
+          type: 'text',
+          timestamp: 200,
+          createdAt: new Date('2026-07-15T15:00:00Z'),
+        },
+        {
+          chatId: '111@c.us',
+          chatName: 'Older',
+          body: 'older',
+          type: 'text',
+          timestamp: 100,
+          createdAt: new Date('2026-07-15T14:00:00Z'),
+        },
+        {
+          chatId: '222@c.us',
+          chatName: 'Newest',
+          body: 'duplicate',
+          type: 'text',
+          timestamp: 150,
+          createdAt: new Date('2026-07-15T14:30:00Z'),
+        },
+      ]);
+
+      const result = await service.getChats('sess-uuid-1');
+
+      expect(result).toEqual([
+        {
+          id: '222@c.us',
+          name: 'Newest',
+          isGroup: false,
+          unreadCount: 0,
+          timestamp: 200,
+          lastMessage: 'latest',
+        },
+        {
+          id: '111@c.us',
+          name: 'Older',
+          isGroup: false,
+          unreadCount: 0,
+          timestamp: 100,
+          lastMessage: 'older',
+        },
+      ]);
+      expect(messageRepository.find).toHaveBeenCalled();
+    });
+
     it('should throw BadRequestException when session is not started', async () => {
       const session = createMockSession();
       (repository.findOne as jest.Mock).mockResolvedValue(session);
